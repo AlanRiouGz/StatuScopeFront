@@ -1,13 +1,14 @@
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+COPY .npmrc ./
+RUN CYPRESS_INSTALL_BINARY=0 npm ci
 
 COPY . .
 
-ARG EXPO_PUBLIC_API_URL
+ARG EXPO_PUBLIC_API_URL=/api
 ARG EXPO_PUBLIC_FIREBASE_API_KEY
 ARG EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN
 ARG EXPO_PUBLIC_FIREBASE_PROJECT_ID
@@ -21,9 +22,11 @@ ENV EXPO_PUBLIC_FIREBASE_APP_ID=$EXPO_PUBLIC_FIREBASE_APP_ID
 
 RUN npx expo export --platform web
 
-FROM nginx:1.27-alpine
+FROM nginx:1.28-alpine
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+COPY docker/15-dns.envsh /docker-entrypoint.d/15-dns.envsh
+RUN chmod +x /docker-entrypoint.d/15-dns.envsh
 COPY --from=builder /app/dist /usr/share/nginx/html
 
 EXPOSE 8080

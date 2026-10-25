@@ -1,0 +1,10 @@
+# CI has already installed dependencies, tested, and exported the web application.
+FROM nginx:1.28-alpine
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+COPY docker/15-dns.envsh /docker-entrypoint.d/15-dns.envsh
+RUN chmod +x /docker-entrypoint.d/15-dns.envsh
+COPY dist/ /usr/share/nginx/html/
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+CMD ["nginx", "-g", "daemon off;"]

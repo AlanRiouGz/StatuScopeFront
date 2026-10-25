@@ -1,0 +1,493 @@
+template:
+  name: StatuScope frontend End-to-End
+  type: Pipeline
+  projectIdentifier: Pruebas1
+  orgIdentifier: lan_Playground
+  spec:
+    properties:
+      ci:
+        codebase:
+          repoName: <+input>
+          build: <+input>
+          sparseCheckout: []
+    stages:
+      - stage:
+          name: CI Stage
+          identifier: CI_Stage
+          description: ""
+          type: CI
+          spec:
+            cloneCodebase: true
+            caching:
+              enabled: false
+              override: false
+              paths: []
+            platform:
+              os: Linux
+              arch: Amd64
+            runtime:
+              type: Docker
+              spec:
+                harnessImageConnectorRef: Docker_infra
+            execution:
+              steps:
+                - step:
+                    name: Extract variables
+                    identifier: Extract_variables
+                    type: Run
+                    spec:
+                      connectorRef: Docker_infra
+                      image: node:22-alpine
+                      shell: Sh
+                      command: |-
+                        set -eu
+                        export PROJECT_NAME=statusscope-frontend
+                        export VERSION=$(node -p "require('./package.json').version")
+                      outputVariables:
+                        - name: PROJECT_NAME
+                        - name: VERSION
+                - parallel:
+                    - stepGroup:
+                        name: SAST
+                        identifier: Testing_Group
+                        steps:
+                          - parallel:
+                              - step:
+                                  type: Semgrep
+                                  name: Semgrep
+                                  identifier: Semgrep_1
+                                  spec:
+                                    mode: orchestration
+                                    config: default
+                                    target:
+                                      type: repository
+                                      detection: auto
+                                    advanced:
+                                      log:
+                                        level: info
+                                      fail_on_severity: <+pipeline.variables.Quality_gate>
+                              - step:
+                                  type: Gitleaks
+                                  name: Gitleaks
+                                  identifier: Gitleaks_1
+                                  spec:
+                                    mode: orchestration
+                                    config: default
+                                    target:
+                                      type: repository
+                                      detection: auto
+                                    advanced:
+                                      log:
+                                        level: info
+                                      fail_on_severity: <+pipeline.variables.Quality_gate>
+                        when:
+                          stageStatus: Success
+                          condition: <+pipeline.variables.STO_scans>
+                    - stepGroup:
+                        name: SCA
+                        identifier: SCA
+                        steps:
+                          - step:
+                              type: Owasp
+                              name: Owasp
+                              identifier: Owasp_1
+                              spec:
+                                mode: orchestration
+                                config: default
+                                target:
+                                  type: repository
+                                  detection: auto
+                                advanced:
+                                  log:
+                                    level: info
+                                  fail_on_severity: <+pipeline.variables.Quality_gate>
+                        when:
+                          stageStatus: Success
+                          condition: <+pipeline.variables.STO_scans>
+                - stepGroup:
+                    name: Build Artifact
+                    identifier: Build_Artifact
+                    steps:
+                      - step:
+                          name: Install dependencies
+                          identifier: Install_Dependencies
+                          type: Run
+                          spec:
+                            connectorRef: Docker_infra
+                            image: node:22-alpine
+                            shell: Sh
+                            command: |-
+                              set -eu
+                              CYPRESS_INSTALL_BINARY=0 npm ci --no-audit --no-fund
+                      - step:
+                          name: Unit and integration tests
+                          identifier: Unit_test_with_reports
+                          type: Run
+                          spec:
+                            connectorRef: Docker_infra
+                            image: node:22-alpine
+                            shell: Sh
+                            command: |-
+                              set -eu
+                              mkdir -p reports
+                              npx vitest run --project unit --reporter=default --reporter=junit --outputFile=reports/junit.xml
+                            reports:
+                              type: JUnit
+                              spec:
+                                paths:
+                                  - reports/junit.xml
+                      - step:
+                          name: Export web application
+                          identifier: Build_Web
+                          type: Run
+                          spec:
+                            connectorRef: Docker_infra
+                            image: node:22-alpine
+                            shell: Sh
+                            command: |-
+                              set -eu
+                              npm run build:web
+                              test -f dist/index.html
+                            envVariables:
+                              EXPO_PUBLIC_API_URL: /api
+                              EXPO_PUBLIC_FIREBASE_API_KEY: <+pipeline.variables.Firebase_api_key>
+                              EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN: <+pipeline.variables.Firebase_auth_domain>
+                              EXPO_PUBLIC_FIREBASE_PROJECT_ID: <+pipeline.variables.Firebase_project_id>
+                              EXPO_PUBLIC_FIREBASE_APP_ID: <+pipeline.variables.Firebase_app_id>
+                - stepGroup:
+                    name: Container Scanning
+                    identifier: Container_Scanning
+                    steps:
+                      - parallel:
+                          - step:
+                              type: Background
+                              name: DinD
+                              identifier: Background_1
+                              spec:
+                                connectorRef: Docker_infra
+                                image: docker:dind
+                                shell: Sh
+                          - step:
+                              type: Run
+                              name: Build Docker Image Local
+                              identifier: Build_Docker_Image_Local
+                              spec:
+                                connectorRef: Docker_infra
+                                image: docker:24.0.5-cli
+                                shell: Sh
+                                command: |-
+                                  set -eu
+                                  attempt=0
+                                  until docker info >/dev/null 2>&1; do
+                                    attempt=$((attempt + 1))
+                                    [ "$attempt" -lt 60 ] || { echo "Docker did not become ready in 120 seconds"; exit 1; }
+                                    sleep 2
+                                  done
+                                  IMAGE_NAME="<+pipeline.stages.CI_Stage.spec.execution.steps.Extract_variables.output.outputVariables.PROJECT_NAME>:ci-<+pipeline.sequenceId>"
+                                  docker build -f Dockerfile.ci -t "$IMAGE_NAME" .
+                      - parallel:
+                          - step:
+                              type: AquaTrivy
+                              name: AquaTrivy
+                              identifier: AquaTrivy
+                              spec:
+                                mode: orchestration
+                                config: default
+                                target:
+                                  type: container
+                                  detection: auto
+                                advanced:
+                                  log:
+                                    level: info
+                                  fail_on_severity: <+pipeline.variables.Quality_gate>
+                                privileged: true
+                                image:
+                                  type: local_image
+                                  tag: ci-<+pipeline.sequenceId>
+                                  name: <+pipeline.stages.CI_Stage.spec.execution.steps.Extract_variables.output.outputVariables.PROJECT_NAME>
+                                sbom:
+                                  format: spdx-json
+                              when:
+                                stageStatus: Success
+                                condition: <+pipeline.variables.STO_scans>
+                          - step:
+                              type: Grype
+                              name: Grype
+                              identifier: Grype
+                              spec:
+                                mode: orchestration
+                                config: default
+                                target:
+                                  type: container
+                                  detection: auto
+                                advanced:
+                                  log:
+                                    level: info
+                                  fail_on_severity: <+pipeline.variables.Quality_gate>
+                                privileged: true
+                                image:
+                                  type: local_image
+                                  tag: ci-<+pipeline.sequenceId>
+                                  name: <+pipeline.stages.CI_Stage.spec.execution.steps.Extract_variables.output.outputVariables.PROJECT_NAME>
+                              when:
+                                stageStatus: Success
+                                condition: <+pipeline.variables.STO_scans>
+                - stepGroup:
+                    name: Publish Image
+                    identifier: Publish_Image
+                    steps:
+                      - step:
+                          type: BuildAndPushDockerRegistry
+                          name: BuildAndPushDockerRegistry
+                          identifier: BuildAndPushDockerRegistry_1
+                          spec:
+                            repo: <+pipeline.variables.Image_repository>
+                            tags:
+                              - <+pipeline.sequenceId>
+                            dockerfile: Dockerfile.ci
+                            context: .
+                            registryRef: <+pipeline.variables.Registry>
+                          when:
+                            stageStatus: Success
+            buildIntelligence:
+              enabled: false
+      - stage:
+          name: Test Approval
+          identifier: Test_Approval
+          description: ""
+          type: Approval
+          spec:
+            execution:
+              steps:
+                - step:
+                    name: Test Approval
+                    identifier: Test_Approval
+                    type: HarnessApproval
+                    timeout: 1d
+                    spec:
+                      approvalMessage: |-
+                        Please review the following information
+                        and approve the pipeline progression
+                      includePipelineExecutionHistory: true
+                      approvers:
+                        minimumCount: 1
+                        disallowPipelineExecutor: false
+                        userGroups:
+                          - account.Estancia2026
+                      isAutoRejectEnabled: false
+                      approverInputs: []
+          tags: {}
+          when:
+            pipelineStatus: Success
+            condition: "false"
+      - stage:
+          name: CD Stage
+          identifier: CD_Stage
+          description: ""
+          type: Deployment
+          spec:
+            deploymentType: Kubernetes
+            service:
+              serviceRef: <+input>
+              serviceInputs: <+input>
+            environment:
+              environmentRef: <+input>
+              deployToAll: false
+              environmentInputs: <+input>
+              serviceOverrideInputs: <+input>
+              infrastructureDefinitions: <+input>
+            execution:
+              steps:
+                - stepGroup:
+                    name: Canary Deployment
+                    identifier: canaryDeployment
+                    steps:
+                      - step:
+                          name: Canary Deployment
+                          identifier: canaryDeployment
+                          type: K8sCanaryDeploy
+                          timeout: 10m
+                          spec:
+                            instanceSelection:
+                              type: Count
+                              spec:
+                                count: 1
+                            skipDryRun: false
+                      - step:
+                          name: Canary Delete
+                          identifier: canaryDelete
+                          type: K8sCanaryDelete
+                          timeout: 10m
+                          spec: {}
+                - stepGroup:
+                    name: Primary Deployment
+                    identifier: primaryDeployment
+                    steps:
+                      - step:
+                          name: Rolling Deployment
+                          identifier: rollingDeployment
+                          type: K8sRollingDeploy
+                          timeout: 10m
+                          spec:
+                            skipDryRun: false
+                - stepGroup:
+                    name: CD Validation
+                    identifier: CD_Validation
+                    steps:
+                      - step:
+                          type: ShellScript
+                          name: Deploy Variables
+                          identifier: Deploy_Variables
+                          spec:
+                            shell: Bash
+                            executionTarget: {}
+                            source:
+                              type: Inline
+                              spec:
+                                script: |-
+                                  set -euo pipefail
+                                  export KUBECONFIG="$HARNESS_KUBE_CONFIG_PATH"
+                                  NAMESPACE="<+infra.namespace>"
+                                  SERVICE="statusscope-frontend"
+                                  NODE_PORT=$(kubectl -n "$NAMESPACE" get svc "$SERVICE" -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}')
+                                  test -n "$NODE_PORT" || { echo "No NodePort found for $SERVICE"; exit 1; }
+                                  export NODE_PORT
+                                  echo "$SERVICE NodePort: $NODE_PORT"
+                            environmentVariables: []
+                            outputVariables:
+                              - name: NODE_PORT
+                                type: String
+                                value: NODE_PORT
+                            includeInfraSelectors: false
+                          timeout: 10m
+              rollbackSteps:
+                - step:
+                    name: Canary Delete
+                    identifier: rollbackCanaryDelete
+                    type: K8sCanaryDelete
+                    timeout: 10m
+                    spec: {}
+                - step:
+                    name: Rolling Rollback
+                    identifier: rollingRollback
+                    type: K8sRollingRollback
+                    timeout: 10m
+                    spec: {}
+          tags: {}
+          failureStrategies:
+            - onFailure:
+                errors:
+                  - AllErrors
+                action:
+                  type: StageRollback
+      - stage:
+          name: STO stage
+          identifier: STO_stage
+          description: ""
+          type: SecurityTests
+          spec:
+            cloneCodebase: false
+            caching:
+              enabled: true
+              override: false
+              paths: []
+            platform:
+              os: Linux
+              arch: Amd64
+            runtime:
+              type: Docker
+              spec:
+                harnessImageConnectorRef: Docker_infra
+            execution:
+              steps:
+                - step:
+                    type: Nmap
+                    name: Nmap
+                    identifier: Nmap_1
+                    spec:
+                      mode: orchestration
+                      config: default
+                      target:
+                        type: instance
+                        detection: auto
+                      advanced:
+                        log:
+                          level: info
+                        fail_on_severity: <+pipeline.variables.Quality_gate>
+                        args:
+                          cli: -Pn -sV -p <+pipeline.stages.CD_Stage.spec.execution.steps.CD_Validation.steps.Deploy_Variables.output.outputVariables.NODE_PORT>
+                      instance:
+                        domain: host.docker.internal
+                    when:
+                      stageStatus: Success
+                      condition: <+pipeline.variables.STO_scans>
+                - step:
+                    type: Zap
+                    name: Zap
+                    identifier: Zap
+                    spec:
+                      mode: orchestration
+                      config: default
+                      target:
+                        type: instance
+                        detection: auto
+                      advanced:
+                        log:
+                          level: info
+                        fail_on_severity: <+pipeline.variables.Quality_gate>
+                      instance:
+                        domain: host.docker.internal
+                        protocol: http
+                        port: <+pipeline.stages.CD_Stage.spec.execution.steps.CD_Validation.steps.Deploy_Variables.output.outputVariables.NODE_PORT>
+                    when:
+                      stageStatus: Success
+                      condition: "false"
+            buildIntelligence:
+              enabled: false
+          when:
+            pipelineStatus: Success
+            condition: <+pipeline.variables.STO_scans>
+    variables:
+      - name: STO_scans
+        type: String
+        description: ""
+        required: false
+        value: <+input>.default(true).selectOneFrom(true,false)
+      - name: Quality_gate
+        type: String
+        description: ""
+        required: false
+        value: <+input>.default(None).selectOneFrom(None,Low,Medium,High,Critical)
+      - name: Registry
+        type: String
+        description: ""
+        required: false
+        value: <+input>.default(statuscopefront)
+      - name: Image_repository
+        type: String
+        description: Repository within the Harness registry; also use this in the CD artifact source.
+        required: true
+        value: <+input>.default(statusscope-frontend)
+      - name: Firebase_api_key
+        type: String
+        description: Public Firebase WEB configuration (never the Admin SDK private key).
+        required: true
+        value: <+input>
+      - name: Firebase_auth_domain
+        type: String
+        description: Public Firebase WEB configuration (never the Admin SDK private key).
+        required: true
+        value: <+input>
+      - name: Firebase_project_id
+        type: String
+        description: Public Firebase WEB configuration (never the Admin SDK private key).
+        required: true
+        value: <+input>
+      - name: Firebase_app_id
+        type: String
+        description: Public Firebase WEB configuration (never the Admin SDK private key).
+        required: true
+        value: <+input>
+    allowStageExecutions: true
+  identifier: StatuScope_frontend_EndToEnd
+  versionLabel: 1.0.0

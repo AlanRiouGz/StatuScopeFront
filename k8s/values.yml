@@ -1,0 +1,6 @@
+namespace: <+infra.namespace>
+image: <+artifact.image>
+imagePullPolicy: IfNotPresent
+registrySecretName: statusscope-registry
+replicas: 1
+nodePort: 30080

@@ -1,5 +1,4 @@
 node_modules
-dist
 .expo
 .git
 .gitignore
@@ -8,3 +7,8 @@ npm-debug.log
 yarn-error.log
 coverage
 storybook-static
+.env
+.env.*
+!.env.example
+*-firebase-adminsdk-*.json
+firebase-service-account.json
